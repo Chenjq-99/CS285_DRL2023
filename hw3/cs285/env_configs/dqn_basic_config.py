@@ -19,7 +19,7 @@ def basic_dqn_config(
     exp_name: Optional[str] = None,
     hidden_size: int = 64,
     num_layers: int = 2,
-    learning_rate: float = 1e-3,
+    learning_rate: float = 8e-4,
     total_steps: int = 300000,
     discount: float = 0.99,
     target_update_period: int = 1000,
