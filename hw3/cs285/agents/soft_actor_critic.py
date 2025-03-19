@@ -274,13 +274,13 @@ class SoftActorCritic(nn.Module):
 
             # Our best guess of the Q-values is the mean of the ensemble
             q_values = torch.mean(q_values, axis=0)
-            advantage = q_values
+            advantage = q_values - q_values.mean(dim=0, keepdim=True)
 
         # Do REINFORCE: calculate log-probs and use the Q-values
         # TODO(student)
         log_probs = action_distribution.log_prob(action)
         loss = -torch.mean(log_probs * advantage)
-
+    
         return loss, torch.mean(self.entropy(action_distribution))
 
     def actor_loss_reparametrize(self, obs: torch.Tensor):
@@ -291,13 +291,22 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Sample actions
         # Note: Think about whether to use .rsample() or .sample() here...
-        action = action_distribution.rsample(sample_shape=(self.num_actor_samples,1))
+        action = action_distribution.rsample(sample_shape=(self.num_actor_samples,))
+        assert action.shape == (
+            self.num_actor_samples,
+            batch_size,
+            self.action_dim,
+        ), action.shape
 
         # TODO(student): Compute Q-values for the sampled state-action pair
+        # print("================================debug===================================")
+        # print(action.shape)
         q_values = self.critic(obs[None].expand(self.num_actor_samples, -1, -1), action)
 
         # TODO(student): Compute the actor loss
-        loss = -q_values.mean(dim=0)
+        # print(q_values.shape)
+        loss = torch.mean(-q_values)
+        # print(loss.shape)
 
         return loss, torch.mean(self.entropy(action_distribution))
 
@@ -367,7 +376,7 @@ class SoftActorCritic(nn.Module):
         if self.target_update_period is not None and step % self.target_update_period == 0:
             self.update_target_critic()
         elif self.soft_target_update_rate is not None:
-            self.update_target_critic(self.soft_target_update_rate)
+            self.soft_update_target_critic(self.soft_target_update_rate)
 
         # Average the critic info over all of the steps
         critic_info = {
