@@ -149,9 +149,9 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Implement the different backup strategies.
         if self.target_critic_backup_type == "doubleq":
-            next_qs = next_qs.flip(0)
+            next_qs = torch.stack([next_qs[(i+1)%num_critic_networks] for i in range(num_critic_networks)])
         elif self.target_critic_backup_type == "min":
-            next_qs, _ = torch.min(next_qs, dim=0)
+            next_qs = torch.min(next_qs, dim=0)[0]
         elif self.target_critic_backup_type == "mean":
             next_qs = torch.mean(next_qs, dim=0)
         else:
@@ -206,15 +206,12 @@ class SoftActorCritic(nn.Module):
             if self.use_entropy_bonus and self.backup_entropy:
                 # TODO(student): Add entropy bonus to the target values for SAC
                 next_action_entropy = self.entropy(next_action_distribution)
-                next_action_entropy = next_action_entropy[None].expand(
-                    (self.num_critic_networks, batch_size)
-                ).contiguous()
-                assert next_action_entropy.shape == next_qs.shape, next_action_entropy.shape
-
-                next_qs -= self.temperature * next_action_entropy
+                next_qs += self.temperature * next_action_entropy.expand(self.num_critic_networks, batch_size)
 
             # Compute the target Q-value
-            target_values: torch.Tensor = reward[None] + self.discount * torch.logical_not(done[None]) * next_qs
+            flag = (1 - done.to(torch.int8)).expand(self.num_critic_networks, batch_size)
+            target_values: torch.Tensor = reward.expand(self.num_critic_networks, batch_size) + \
+                                            flag * self.discount * next_qs
             assert target_values.shape == (
                 self.num_critic_networks,
                 batch_size
@@ -245,8 +242,10 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Compute the entropy of the action distribution.
         # Note: Think about whether to use .rsample() or .sample() here...
-        sampled_action = action_distribution.rsample()
-        entropy = -action_distribution.log_prob(sampled_action)
+        sample_points = 1000
+        sample_actions = action_distribution.rsample((sample_points,))
+        logprob = action_distribution.log_prob(sample_actions)
+        entropy = torch.mean(-logprob, dim=0)
         return entropy
 
     def actor_loss_reinforce(self, obs: torch.Tensor):
@@ -257,7 +256,7 @@ class SoftActorCritic(nn.Module):
 
         with torch.no_grad():
             # TODO(student): draw num_actor_samples samples from the action distribution for each batch element
-            action = action_distribution.sample(sample_shape=(self.num_actor_samples,))
+            action = action_distribution.sample((self.num_actor_samples,))
             assert action.shape == (
                 self.num_actor_samples,
                 batch_size,
@@ -265,7 +264,7 @@ class SoftActorCritic(nn.Module):
             ), action.shape
 
             # TODO(student): Compute Q-values for the current state-action pair
-            q_values = self.critic(obs[None].expand(self.num_actor_samples, -1, -1), action)
+            q_values = self.critic(obs.expand((self.num_actor_samples, *obs.shape)), action)
             assert q_values.shape == (
                 self.num_critic_networks,
                 self.num_actor_samples,
@@ -274,13 +273,12 @@ class SoftActorCritic(nn.Module):
 
             # Our best guess of the Q-values is the mean of the ensemble
             q_values = torch.mean(q_values, axis=0)
-            advantage = q_values - q_values.mean(dim=0, keepdim=True)
+            advantage = q_values 
 
         # Do REINFORCE: calculate log-probs and use the Q-values
         # TODO(student)
-        log_probs = action_distribution.log_prob(action)
-        loss = -torch.mean(log_probs * advantage)
-    
+        log_probs = action_distribution.log_prob(action) 
+        loss = -(log_probs * advantage).mean() 
         return loss, torch.mean(self.entropy(action_distribution))
 
     def actor_loss_reparametrize(self, obs: torch.Tensor):
@@ -291,22 +289,12 @@ class SoftActorCritic(nn.Module):
 
         # TODO(student): Sample actions
         # Note: Think about whether to use .rsample() or .sample() here...
-        action = action_distribution.rsample(sample_shape=(self.num_actor_samples,))
-        assert action.shape == (
-            self.num_actor_samples,
-            batch_size,
-            self.action_dim,
-        ), action.shape
+        action = action_distribution.rsample((self.num_actor_samples,))
 
         # TODO(student): Compute Q-values for the sampled state-action pair
-        # print("================================debug===================================")
-        # print(action.shape)
-        q_values = self.critic(obs[None].expand(self.num_actor_samples, -1, -1), action)
-
+        q_values = self.critic(obs.expand((self.num_actor_samples, *obs.shape)), action)
         # TODO(student): Compute the actor loss
-        # print(q_values.shape)
-        loss = torch.mean(-q_values)
-        # print(loss.shape)
+        loss = -q_values.mean()
 
         return loss, torch.mean(self.entropy(action_distribution))
 
@@ -366,18 +354,17 @@ class SoftActorCritic(nn.Module):
             for _ in range(self.num_critic_updates)
         ]
         # TODO(student): Update the actor
-        actor_info = self.update_actor(obs=observations)
+        actor_info = self.update_actor(observations)
 
         # TODO(student): Perform either hard or soft target updates.
         # Relevant variables:
         #  - step
         #  - self.target_update_period (None when using soft updates)
         #  - self.soft_target_update_rate (None when using hard updates)
-        if self.target_update_period is not None and step % self.target_update_period == 0:
+        if self.target_update_period is not None and step % self.target_update_period:
             self.update_target_critic()
-        elif self.soft_target_update_rate is not None:
+        if self.soft_target_update_rate is not None:
             self.soft_update_target_critic(self.soft_target_update_rate)
-
         # Average the critic info over all of the steps
         critic_info = {
             k: np.mean([info[k] for info in critic_infos]) for k in critic_infos[0]
